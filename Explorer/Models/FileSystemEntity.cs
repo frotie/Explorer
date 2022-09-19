@@ -17,6 +17,8 @@ namespace Explorer.Models
 
         public DirInfo? ParentDir { get; set; }
 
+        public string? AdditionalData { get; set; }
+
         public FileSystemEntity(string path, DirInfo? parentDir)
         {
             Path = path;

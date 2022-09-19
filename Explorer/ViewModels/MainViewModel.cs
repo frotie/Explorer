@@ -1,7 +1,9 @@
 ﻿using Explorer.Models;
+using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -20,20 +22,43 @@ namespace Explorer.ViewModels
 
         public DirInfo? ActiveDir { get; set; }
 
-        public string? ErrorText { get; set; }
+        private FileSystemEntity? selectedEntity;
+
+        public FileSystemEntity? SelectedEntity
+        {
+            get => selectedEntity;
+            set
+            {
+                if (value == selectedEntity)
+                {
+                    return;
+                }
+
+                selectedEntity = value;
+                StatusText = selectedEntity?.AdditionalData;
+                OnPropertyChanged();
+            }
+        }
+
+        public string? StatusText { get; set; }
+
+        public Dictionary<FileData, DateTime> LastOpenedFiles { get; set; }
+
+        private DirInfo? lastParent;
 
         public MainViewModel()
         {
             DriveInfo[] drivers = DriveInfo.GetDrives();
-            TreeViewItems = new ObservableCollection<DirInfo>(drivers.Select(x => new DirInfo(x.Name, null)));
+            TreeViewItems = new ObservableCollection<DirInfo>(drivers.Select(x => new MyDriveInfo(x)));
             AvailablePaths = new ObservableCollection<DirInfo>();
+            LastOpenedFiles = new Dictionary<FileData, DateTime>();
         }
 
-        public RelayCommand WindowLoaded => new RelayCommand(async s =>
+        public RelayCommand WindowLoaded => new RelayCommand(s =>
         {
             DirInfo firstDisk = TreeViewItems.First();
             firstDisk.IsSelected = firstDisk.IsExpanded = true;
-            await SetNewActiveElement(firstDisk);
+            SetNewActiveElement(firstDisk);
         });
 
         private async Task FillDirectory(DirInfo? dir)
@@ -48,41 +73,48 @@ namespace Explorer.ViewModels
             {
                 dir.ClearData();
 
-                if (dir.ParentDir != null)
-                {
-                    dir.ParentDir.ShownName = "...";
-                    dir.DirContent.Add(dir.ParentDir);
-                }
+                List<DirInfo> dirs = new List<DirInfo>();
+                List<FileData> files = new List<FileData>();
 
                 await Task.Factory.StartNew(() =>
                 {
                     foreach (string dirPath in Directory.GetDirectories(dir.Path))
                     {
                         DirInfo di = new DirInfo(dirPath, dir);
-                        dir.Dirs.Add(di);
-                        dir.DirContent.Add(di);
+                        dirs.Add(di);
                     }
 
                     foreach (string file in Directory.GetFiles(dir.Path))
                     {
                         FileData fileEx = new FileData(file, dir);
-                        dir.Files.Add(fileEx);
-                        dir.DirContent.Add(fileEx);
+                        files.Add(fileEx);
                     }
                 });
+
+                foreach (DirInfo di in dirs)
+                {
+                    dir.Dirs.Add(di);
+                    dir.DirContent.Add(di);
+                }
+
+                foreach (FileData fd in files)
+                {
+                    dir.Files.Add(fd);
+                    dir.DirContent.Add(fd);
+                }
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
-                SetError($"Не удалось открыть папку: {ex.Message}");
+                StatusText = $"Не удалось открыть папку: {ex.Message}";
             }
         }
 
-        public RelayCommand TreeViewSelected => new RelayCommand(async s =>
+        public RelayCommand TreeViewSelected => new RelayCommand(s =>
         {
             if (s is DirInfo dir)
             {
                 dir.IsExpanded = true;
-                await SetNewActiveElement(dir);
+                SetNewActiveElement(dir);
             }
         }, s => s != null);
 
@@ -96,17 +128,26 @@ namespace Explorer.ViewModels
             await FillDirectory(info);
         });
 
-        public RelayCommand ElementDoubleClick => new RelayCommand(async s =>
+        public RelayCommand ElementDoubleClick => new RelayCommand(s =>
         {
             if (s is DirInfo dir)
             {
-                await SetNewActiveElement(dir);
+                SetNewActiveElement(dir);
             }
             else if (s is FileData file)
             {
                 try
                 {
-                    System.Diagnostics.Process.Start(file.Path);
+                    AddInHistory(file);
+                    Process process = new Process
+                    {
+                        StartInfo = new ProcessStartInfo(file.Path)
+                        {
+                            UseShellExecute = true,
+                        }
+                    };
+
+                    process.Start();
                 }
                 catch (Exception ex)
                 {
@@ -115,11 +156,41 @@ namespace Explorer.ViewModels
             }
         });
 
-        private async Task SetNewActiveElement(DirInfo? dir)
+        public RelayCommand SaveHistory => new RelayCommand(async s =>
         {
-            SetError("");
+            SaveFileDialog sfd = new SaveFileDialog()
+            {
+                Filter = "Текстовый файл|*.txt"
+            };
+
+            if (sfd.ShowDialog() == true)
+            {
+                string fileName = sfd.FileName;
+                string result = string.Empty;
+                IEnumerable<KeyValuePair<FileData, DateTime>> files = LastTenSecOpenedFiles;
+                foreach (KeyValuePair<FileData, DateTime> fileData in files)
+                {
+                    result += fileData.Key.Path + "\t" + fileData.Value.ToLongTimeString() + "\n";
+                }
+
+                try
+                {
+                    File.WriteAllText(fileName, result);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Не удалось сохранить файл с историей:\n\n{ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+
+                await FillDirectory(ActiveDir);
+                UpdateParent(ActiveDir);
+            }
+        });
+
+        private void SetNewActiveElement(DirInfo? dir)
+        {
             if (dir == null ||
-                dir == ActiveDir)
+                ActiveDir == dir)
             {
                 return;
             }
@@ -127,13 +198,54 @@ namespace Explorer.ViewModels
             ActiveDir = dir;
             dir.IsSelected = true;
             dir.IsExpanded = true;
-            await FillDirectory(ActiveDir);
+            StatusText = dir.AdditionalData;
+
+            UpdateParent(dir);
         }
 
-        private void SetError(string errorText)
+        private void UpdateParent(DirInfo? dir)
         {
-            // Timer??
-            ErrorText = errorText;
+            if (dir == null)
+            {
+                return;
+            }
+
+            if (lastParent != null)
+            {
+                lastParent.ShownName = lastParent.Name;
+            }
+
+            if (dir.ParentDir != null)
+            {
+                dir.ParentDir.ShownName = "...";
+                if (!dir.DirContent.Contains(dir.ParentDir))
+                {
+                    dir.DirContent.Insert(0, dir.ParentDir);
+                }
+
+                lastParent = dir.ParentDir;
+            }
+        }
+
+        private IEnumerable<KeyValuePair<FileData, DateTime>> LastTenSecOpenedFiles => LastOpenedFiles
+                .Where(x => DateTime.Now - x.Value < TimeSpan.FromSeconds(10));
+
+        private void AddInHistory(FileData file)
+        {
+            if (LastOpenedFiles.ContainsKey(file))
+            {
+                LastOpenedFiles[file] = DateTime.Now;
+            }
+            else
+            {
+                LastOpenedFiles.Add(file, DateTime.Now);
+            }
+
+            IEnumerable<FileData> dirsToRemove = LastOpenedFiles.Where(x => !LastTenSecOpenedFiles.Contains(x)).Select(x => x.Key);
+            foreach (FileData fileToRemove in dirsToRemove)
+            {
+                LastOpenedFiles.Remove(fileToRemove);
+            }
         }
     }
 }

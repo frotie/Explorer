@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -9,11 +10,11 @@ namespace Explorer.Models
 {
     internal class DirInfo : FileSystemEntity
     {
-        public List<DirInfo> Dirs { get; set; }
+        public ObservableCollection<DirInfo> Dirs { get; set; }
 
-        public List<FileData> Files { get; set; }
+        public ObservableCollection<FileData> Files { get; set; }
 
-        public List<FileSystemEntity> DirContent { get; set; }
+        public ObservableCollection<FileSystemEntity> DirContent { get; set; }
 
         public bool IsSelected { get; set; }
 
@@ -24,9 +25,15 @@ namespace Explorer.Models
         public DirInfo(string path, DirInfo? parentDir)
             : base(path, parentDir)
         {
-            Dirs = new List<DirInfo>() { EmptyDir };
-            Files = new List<FileData>();
-            DirContent = new List<FileSystemEntity>();
+            Dirs = new ObservableCollection<DirInfo>() { EmptyDir };
+            Files = new ObservableCollection<FileData>();
+            DirContent = new ObservableCollection<FileSystemEntity>();
+
+            if (!string.IsNullOrEmpty(path))
+            {
+                DirectoryInfo di = new DirectoryInfo(path);
+                AdditionalData = $"Время создания: {di.CreationTime} Корневой каталог: {di.Root}";
+            }
         }
 
         public void ClearData()
